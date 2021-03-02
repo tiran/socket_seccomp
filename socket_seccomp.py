@@ -23,56 +23,133 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 """
 
 import socket
+import enum
 import errno
 
 import ctypes
 import ctypes.util
 
 
-# actions
-SCMP_ACT_KILL_PROCESS = 0x80000000
-SCMP_ACT_ALLOW = 0x7FFF0000
+class HexEnum(enum.IntEnum):
+    def __repr__(self):
+        return "<{self.__class__.__name__}.{self._name_}: 0x{self._value_:x}>".format(self=self)
 
 
-def SCMP_ACT_ERRNO(x):
-    return 0x00050000 | (x & 0x0000FFFF)
+class ScmpAction(HexEnum):
+    """SCMP_ACT actions"""
+
+    KILL_PROCESS = 0x80000000
+    KILL_THREAD = 0x00000000
+    KILL = KILL_THREAD
+    TRAP = 0x00030000
+    NOTIFY = 0x7FC00000
+    LOG = 0x7FFC0000
+    ALLOW = 0x7FFF0000
+
+    @classmethod
+    def ERRNO(cls, x):
+        return 0x00050000 | (x & 0x0000FFFF)
+
+    @classmethod
+    def TRACE(cls, x):
+        return 0x7FF00000 | (x & 0x0000FFFF)
 
 
-# compare operators for scmp_arg_cmp
-SCMP_CMP_NE = 1
-SCMP_CMP_LT = 2
-SCMP_CMP_LE = 3
-SCMP_CMP_EQ = 4
-SCMP_CMP_GE = 5
-SCMP_CMP_GT = 6
-SCMP_CMP_MASKED_EQ = 7
+class ScmpCmp(enum.IntEnum):
+    """SCMP_CMP compare operators"""
 
-# architectures
-SCMP_ARCH_NATIVE = 0
-# define AUDIT_ARCH_I386         (EM_386|__AUDIT_ARCH_LE)
-SCMP_ARCH_X86 = 3 | 0x40000000
-# define AUDIT_ARCH_I386         (EM_386|__AUDIT_ARCH_LE)
-SCMP_ARCH_X86_64 = 62 | 0x80000000 | 0x40000000
-# define SCMP_ARCH_X32           (EM_X86_64|__AUDIT_ARCH_LE)
-SCMP_ARCH_X32 = 62 | 0x40000000
+    NE = 1
+    LT = 2
+    LE = 3
+    EQ = 4
+    GE = 5
+    GT = 6
+    MASKED_EQ = 7
+
+
+class ELF_EM(enum.IntEnum):
+    """linux/elf-em.h"""
+
+    I386 = 3
+    MIPS = 8
+    PARISC = 15
+    PPC = 20
+    PPC64 = 21
+    S390 = 22
+    ARM = 40
+    X86_64 = 62
+    AARCH64 = 183
+    RISCV = 243
+
+
+class AuditArch(enum.IntEnum):
+    """audit.h"""
+
+    CONVENTION_MIPS64_N32 = 0x20000000
+    AA_64BIT = 0x80000000
+    LE = 0x40000000
+
+
+class ScmpArch(HexEnum):
+    """SCMP_ARCH architectures"""
+
+    NATIVE = 0
+    X86 = ELF_EM.I386 | AuditArch.LE
+    X86_64 = ELF_EM.X86_64 | AuditArch.AA_64BIT | AuditArch.LE
+    X32 = ELF_EM.X86_64 | AuditArch.LE
+    ARM = ELF_EM.ARM | AuditArch.LE
+    AARCH64 = ELF_EM.AARCH64 | AuditArch.AA_64BIT | AuditArch.LE
+    MIPS = ELF_EM.MIPS
+    MIPS64 = ELF_EM.MIPS | AuditArch.AA_64BIT
+    MIPS64N32 = ELF_EM.MIPS | AuditArch.AA_64BIT | AuditArch.CONVENTION_MIPS64_N32
+    MIPSEL = ELF_EM.MIPS | AuditArch.LE
+    MIPSEL64 = ELF_EM.MIPS | AuditArch.AA_64BIT | AuditArch.LE
+    MIPSEL64N32 = (
+        ELF_EM.MIPS
+        | AuditArch.AA_64BIT
+        | AuditArch.LE
+        | AuditArch.CONVENTION_MIPS64_N32
+    )
+    PARISC = ELF_EM.PARISC
+    PARISC64 = ELF_EM.PARISC | AuditArch.AA_64BIT
+    PPC = ELF_EM.PPC
+    PPC64 = ELF_EM.PPC64 | AuditArch.AA_64BIT
+    PPC64LE = ELF_EM.PPC64 | AuditArch.AA_64BIT | AuditArch.LE
+    S390 = ELF_EM.S390
+    S390X = ELF_EM.S390 | AuditArch.AA_64BIT
+    RISCV64 = ELF_EM.RISCV | AuditArch.AA_64BIT | AuditArch.LE
+
+
+SIBBLING_ARCHS = {
+    ScmpArch.X86: [ScmpArch.X86_64, ScmpArch.X32],
+    ScmpArch.X86_64: [ScmpArch.X86, ScmpArch.X32],
+    ScmpArch.X32: [ScmpArch.X86_64, ScmpArch.X86],
+}
 
 
 def _check_init(result, func, args):
     if result is None:
-        raise OSError(func.__name__, args)
+        # seccomp_init(3) returns negative errno
+        raise OSError(-result, func.__name__, args)
     return result
 
 
 def _check_success(result, func, args):
     if result != 0:
-        raise OSError(result, func.__name__, args)
+        raise OSError(-result, func.__name__, args)
     return result
 
 
 def _check_syscall(result, func, args):
     if result < 0:
-        raise OSError(result, func.__name__, args)
+        raise OSError(errno.ENOSYS, func.__name__, args)
     return result
+
+
+def _check_arch(result, func, args):
+    if result == ScmpArch.NATIVE:
+        raise OSError(errno.EINVAL, func.__name__, args)
+    return ScmpArch(result)
 
 
 class _scmp_filter(ctypes.Structure):
@@ -92,7 +169,7 @@ class scmp_arg_cmp(ctypes.Structure):
     ]
 
     def __init__(self, arg, op, datum_a, datum_b=None):
-        if op == SCMP_CMP_MASKED_EQ:
+        if op == ScmpCmp.MASKED_EQ:
             if datum_b is None:
                 raise ValueError
         else:
@@ -125,6 +202,7 @@ _lsc.seccomp_arch_add.errcheck = _check_success
 
 _lsc.seccomp_arch_native.argtypes = ()
 _lsc.seccomp_arch_native.restype = ctypes.c_uint32
+_lsc.seccomp_arch_native.errcheck = _check_arch
 
 _lsc.seccomp_rule_add_array.argtypes = (
     scmp_filter_ctx,
@@ -145,15 +223,8 @@ NATIVE_ARCH = _lsc.seccomp_arch_native()
 
 
 def add_sibbling_archs(ctx):
-    if NATIVE_ARCH == SCMP_ARCH_X86:
-        _lsc.seccomp_arch_add(ctx, SCMP_ARCH_X86_64)
-        _lsc.seccomp_arch_add(ctx, SCMP_ARCH_X32)
-    elif NATIVE_ARCH == SCMP_ARCH_X86_64:
-        _lsc.seccomp_arch_add(ctx, SCMP_ARCH_X86)
-        _lsc.seccomp_arch_add(ctx, SCMP_ARCH_X32)
-    elif NATIVE_ARCH == SCMP_ARCH_X32:
-        _lsc.seccomp_arch_add(ctx, SCMP_ARCH_X86_64)
-        _lsc.seccomp_arch_add(ctx, SCMP_ARCH_X86)
+    for sibbling in SIBBLING_ARCHS.get(NATIVE_ARCH, []):
+        _lsc.seccomp_arch_add(ctx, sibbling)
 
 
 def resolve_syscall(name, arch_token=NATIVE_ARCH):
@@ -172,9 +243,9 @@ def rule_add_array(ctx, action, syscall, *args):
     _lsc.seccomp_rule_add_array(ctx, action, syscall_nr, len(arg_array), arg_array)
 
 
-def block_socket(action=SCMP_ACT_ERRNO(errno.EPERM)):
+def block_socket(action=ScmpAction.ERRNO(errno.EPERM)):
     # allow all syscalls by default
-    sc = _lsc.seccomp_init(SCMP_ACT_ALLOW)
+    sc = _lsc.seccomp_init(ScmpAction.ALLOW)
     try:
         # create rules for sibbling archs (e.g. X86 on X86_64)
         add_sibbling_archs(sc)
@@ -183,28 +254,9 @@ def block_socket(action=SCMP_ACT_ERRNO(errno.EPERM)):
             sc,
             action,
             "socket",
-            scmp_arg_cmp(0, SCMP_CMP_NE, socket.AF_UNIX),
+            scmp_arg_cmp(0, ScmpCmp.NE, socket.AF_UNIX),
         )
         # load seccomp rules
         _lsc.seccomp_load(sc)
     finally:
         _lsc.seccomp_release(sc)
-
-
-def test():
-    socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    socket.create_connection(("www.python.org", 443)).close()
-
-    block_socket()
-
-    socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        socket.create_connection(("www.python.org", 443))
-    except PermissionError as e:
-        print(f"TCP/IP socket created failed as exepcted: {e}")
-    else:
-        raise RuntimeError("seccomp filtering has failed")
-
-
-if __name__ == "__main__":
-    test()
